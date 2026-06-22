@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Relatività della Simultaneità — Treno colpito da due lampi</title>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        margin:0; padding:10px;
+        background:#050818; color:#ddd;
+        text-align:center;
+    }
+    h1 { color: #4fc3f7; font-size: 1.45em; margin: 8px 0; }
+    .container {
+        max-width: 760px;
+        margin:0 auto;
+        background:#112233;
+        padding:12px;
+        border-radius:10px;
+    }
+    canvas {
+        border:3px solid #4fc3f7;
+        border-radius:8px;
+        background:#000;
+        width: 100%;
+        height: auto;
+        display:block;
+    }
+    .controls {
+        margin:15px 0;
+        display:flex;
+        justify-content:center;
+        gap:10px;
+        flex-wrap:wrap;
+        align-items:center;
+    }
+    button, select {
+        padding:10px 14px;
+        font-size: 15px;
+        border-radius:6px;
+        background:#1e3a5f;
+        color:white;
+        border:none;
+        cursor:pointer;
+    }
+    button:hover { background:#4fc3f7; color:#000; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    label { font-size: 14px; }
+    .info {
+        margin:15px auto;
+        padding:14px;
+        background:#1a2a44;
+        border-radius:8px;
+        text-align:left;
+        font-size: 14.5px;
+        line-height:1.5;
+    }
+    .info b.ok { color:#aaffaa; }
+    .info b.diff { color:#ff8888; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>Relatività della Simultaneità</h1>
+    <p style="margin:5px 0 12px;"><strong>Esperimento del treno colpito da due lampi</strong></p>
+
+    <canvas id="canvas" width="720" height="430"></canvas>
+
+    <div class="controls">
+        <button id="strikeBtn">⚡ Fai cadere i lampi</button>
+        <button id="playBtn" disabled>▶ Avvia</button>
+        <button id="stepFineBtn" disabled>⏭ Step fine</button>
+        <button id="stepBtn" disabled>⏭⏭ Step grande</button>
+        <button id="resetBtn">↺ Reset</button>
+
+        <label>Vel. treno:
+            <input type="range" id="speedSlider" min="10" max="90" value="60" style="width:140px;">
+            <span id="speedValue">0.60c</span>
+        </label>
+
+        <select id="viewSelect">
+            <option value="split">Vista divisa</option>
+            <option value="ground">Solo da Terra</option>
+            <option value="train">Solo dal Treno</option>
+        </select>
+
+        <span id="timeReadout" style="font-size:13px; color:#9fb0cc;">t = 0.000</span>
+    </div>
+
+    <div class="info" id="info">
+        <b class="ok">Da Terra (M)</b>: i due lampi colpiscono i binari simultaneamente — la luce percorre la stessa distanza fino a M e lo raggiunge nello stesso istante.<br>
+        <b class="diff">Dal Treno (M′)</b>: M′ si muove verso il lampo davanti (B) e si allontana da quello dietro (A): la luce di B lo raggiunge prima. Per M′ i due eventi <u>non</u> sono simultanei.
+    </div>
+</div>
+
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const W = 720, H = 430;
+    const HALF_W = W / 2;
+
+    // ---- Physical model (single source of truth, ground frame) -----------
+    // A = lampo posteriore, B = lampo anteriore (il treno si muove verso B).
+    // Tutto è calcolato una sola volta per frame in `advance()`; le due
+    // funzioni di disegno leggono solo i risultati, non ricalcolano nulla.
+
+    const C = 220;              // velocità della luce, px / unità di tempo (rallentata per la didattica)
+    const trackY = 300;         // quota dei binari, condivisa da entrambi i pannelli
+    const leftStrikeX = 90;     // posizione (frame a terra) del lampo A
+    const rightStrikeX = 460;   // posizione (frame a terra) del lampo B
+    const trackSpan = 550;      // lunghezza utile di binario visualizzata
+    const midX = (leftStrikeX + rightStrikeX) / 2; // M, fisso a metà strada
+    const trainLen = 150;
+
+    let beta = 0.60;             // v/c
+    function trainSpeed(){ return beta * C * 0.55; } // px/unità tempo, volutamente < C per restare leggibile
+
+    let t = 0;                   // orologio di simulazione, t=0 = istante dei lampi
+    let running = false;
+    let strikesHappened = false;
+    let trainCenterAtStrike = midX; // posizione (a terra) del centro del treno quando cadono i lampi
+
+    let groundHitA = null, groundHitB = null; // istante in cui ciascuna luce raggiunge M
+    let trainHitA = null, trainHitB = null;   // istante in cui ciascuna luce raggiunge M'
+
+    function trainCenterAt(time){
+        return trainCenterAtStrike + trainSpeed() * time;
+    }
+
+    // ---- UI ----------------------------------------------------------------
+    const playBtn = document.getElementById('playBtn');
+    const stepFineBtn = document.getElementById('stepFineBtn');
+    const stepBtn = document.getElementById('stepBtn');
+    const strikeBtn = document.getElementById('strikeBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const speedSlider = document.getElementById('speedSlider');
+    const speedValue = document.getElementById('speedValue');
+    const viewSelect = document.getElementById('viewSelect');
+    const info = document.getElementById('info');
+    const timeReadout = document.getElementById('timeReadout');
+
+    const DEFAULT_INFO = '<b class="ok">Da Terra (M)</b>: i due lampi colpiscono i binari simultaneamente — la luce percorre la stessa distanza fino a M e lo raggiunge nello stesso istante.<br>' +
+                          '<b class="diff">Dal Treno (M′)</b>: M′ si muove verso il lampo anteriore (B) e si allontana da quello posteriore (A): la luce di B lo raggiunge prima. Per M′ i due eventi <u>non</u> sono simultanei.';
+
+    function resetState(){
+        running = false;
+        strikesHappened = false;
+        t = 0;
+        trainCenterAtStrike = midX;
+        groundHitA = null; groundHitB = null;
+        trainHitA = null; trainHitB = null;
+        playBtn.textContent = '▶ Avvia';
+        playBtn.disabled = true;
+        stepFineBtn.disabled = true;
+        stepBtn.disabled = true;
+        info.innerHTML = DEFAULT_INFO;
+        draw();
+    }
+
+    strikeBtn.onclick = () => {
+        trainCenterAtStrike = midX; // il treno è centrato esattamente su M nell'istante dei lampi
+        t = 0;
+        strikesHappened = true;
+        groundHitA = null; groundHitB = null;
+        trainHitA = null; trainHitB = null;
+        playBtn.disabled = false;
+        stepFineBtn.disabled = false;
+        stepBtn.disabled = false;
+        running = true;
+        playBtn.textContent = '⏸ Pausa';
+        requestAnimationFrame(animate);
+    };
+
+    playBtn.onclick = () => {
+        if(!strikesHappened) return;
+        running = !running;
+        playBtn.textContent = running ? '⏸ Pausa' : '▶ Avvia';
+        if(running) requestAnimationFrame(animate);
+    };
+
+    stepFineBtn.onclick = () => {
+        if(!strikesHappened) return;
+        running = false;
+        playBtn.textContent = '▶ Avvia';
+        advance(0.003);
+        draw();
+    };
+
+    stepBtn.onclick = () => {
+        if(!strikesHappened) return;
+        running = false;
+        playBtn.textContent = '▶ Avvia';
+        advance(0.02);
+        draw();
+    };
+
+    resetBtn.onclick = resetState;
+
+    speedSlider.oninput = (e) => {
+        beta = e.target.value / 100;
+        speedValue.textContent = beta.toFixed(2) + 'c';
+        if(!strikesHappened) draw();
+    };
+
+    viewSelect.onchange = draw;
+
+    // ---- Avanzamento simulazione -------------------------------------------
+    function advance(dt){
+        t += dt;
+
+        const waveAx = leftStrikeX + C * t;   // fronte d'onda di A, si espande verso destra
+        const waveBx = rightStrikeX - C * t;  // fronte d'onda di B, si espande verso sinistra
+
+        if(groundHitA === null && waveAx >= midX) groundHitA = t;
+        if(groundHitB === null && waveBx <= midX) groundHitB = t;
+
+        const mPrime = trainCenterAt(t);
+        if(trainHitA === null && waveAx >= mPrime) trainHitA = t;
+        if(trainHitB === null && waveBx <= mPrime) trainHitB = t;
+
+        if(t > 6) running = false;
+
+        if(groundHitA !== null && groundHitB !== null && trainHitA !== null && trainHitB !== null){
+            updateInfo();
+            running = false;
+        }
+    }
+
+    function updateInfo(){
+        let groundLine = '<b class="ok">Da Terra (M)</b>: ';
+        groundLine += Math.abs(groundHitA - groundHitB) < 0.01
+            ? 'i due lampi raggiungono M nello stesso istante — <u>simultanei</u>, come previsto.'
+            : 'arrivo quasi simultaneo (scarto numerico trascurabile).';
+
+        let trainLine = '<b class="diff">Dal Treno (M′)</b>: ';
+        if(Math.abs(trainHitA - trainHitB) < 0.01){
+            trainLine += 'a questa velocità la differenza è quasi impercettibile.';
+        } else if(trainHitB < trainHitA){
+            trainLine += 'il lampo <u>anteriore B</u> ha raggiunto M′ prima di quello posteriore A, di ' + (trainHitA - trainHitB).toFixed(2) + ' unità di tempo — gli eventi non sono simultanei per M′.';
+        } else {
+            trainLine += 'il lampo <u>posteriore A</u> ha raggiunto M′ prima di quello anteriore B, di ' + (trainHitB - trainHitA).toFixed(2) + ' unità di tempo.';
+        }
+
+        info.innerHTML = groundLine + '<br>' + trainLine;
+    }
+
+    // ---- Disegno -------------------------------------------------------------
+    // Mappa una coordinata "binario" (0..trackSpan) in coordinata schermo
+    // dentro un pannello di larghezza panelWidth che inizia a originX.
+    function trackXToScreen(originX, groundX, panelWidth){
+        return originX + 35 + groundX * ((panelWidth - 70) / trackSpan);
+    }
+
+    function drawTrackBed(originX, panelWidth, label){
+        ctx.save();
+        ctx.fillStyle = '#1a2236';
+        ctx.fillRect(originX + 10, trackY - 6, panelWidth - 20, 40);
+        ctx.strokeStyle = '#8a7456';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(originX + 10, trackY); ctx.lineTo(originX + panelWidth - 10, trackY);
+        ctx.moveTo(originX + 10, trackY + 10); ctx.lineTo(originX + panelWidth - 10, trackY + 10);
+        ctx.stroke();
+
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 15px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, originX + 12, 28);
+        ctx.restore();
+    }
+
+    function drawLightningBolt(x, topY, bottomY, alpha, color){
+        if(alpha <= 0) return;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = color;
+        ctx.beginPath();
+        ctx.moveTo(x, topY);
+        ctx.lineTo(x + 10, (topY+bottomY)/2);
+        ctx.lineTo(x - 6, bottomY);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function roundRect(c, x, y, w, h, r){
+        c.beginPath();
+        c.moveTo(x+r, y);
+        c.arcTo(x+w, y, x+w, y+h, r);
+        c.arcTo(x+w, y+h, x, y+h, r);
+        c.arcTo(x, y+h, x, y, r);
+        c.arcTo(x, y, x+w, y, r);
+        c.closePath();
+    }
+
+    function drawTrain(centerScreenX, scale, markerLabel, markerColor){
+        const w = trainLen * scale;
+        const h = 46 * scale;
+        const x0 = centerScreenX - w/2;
+        const top = trackY - h - 4;
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(34,102,238,0.55)';
+        ctx.strokeStyle = 'rgba(150,190,255,0.9)';
+        ctx.lineWidth = 2;
+        roundRect(ctx, x0, top, w, h, 8*scale);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(200,220,255,0.25)';
+        for(let wx = x0 + 8*scale; wx < x0 + w - 8*scale; wx += 22*scale){
+            roundRect(ctx, wx, top + 6*scale, 12*scale, 14*scale, 3*scale);
+            ctx.fill();
+        }
+
+        ctx.strokeStyle = markerColor;
+        ctx.setLineDash([3,4]);
+        ctx.beginPath();
+        ctx.moveTo(centerScreenX, top + h);
+        ctx.lineTo(centerScreenX, trackY + 14);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#ffdd77';
+        ctx.beginPath();
+        ctx.arc(centerScreenX, top + h - 10*scale, 6*scale, 0, Math.PI*2);
+        ctx.fill();
+
+        ctx.fillStyle = markerColor;
+        ctx.font = 'bold ' + Math.max(10, 12*scale) + 'px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(markerLabel, centerScreenX, top - 6);
+        ctx.restore();
+    }
+
+    // Disegna il fronte d'onda luminoso come una circonferenza che si
+    // espande dal punto d'origine del lampo (originScreenX, originY), con
+    // raggio pari alla distanza percorsa dalla luce: radiusPx = C * (t - t0).
+    // Questo è lo stesso valore già usato per individuare l'incontro con
+    // l'osservatore, qui semplicemente disegnato come cerchio anziché come
+    // singola linea verticale, per mostrare che la luce si propaga in tutte
+    // le direzioni e non solo lungo il binario.
+    function drawWaveCircle(originScreenX, originY, radiusPx, hitAlready, color){
+        if(hitAlready || radiusPx <= 0) return;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.6;
+        ctx.globalAlpha = Math.max(0.15, 0.85 - radiusPx/260);
+        ctx.beginPath();
+        ctx.arc(originScreenX, originY, radiusPx, 0, Math.PI*2);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawFlashBurst(x, y, alpha){
+        if(alpha <= 0) return;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        const g = ctx.createRadialGradient(x,y,0,x,y,22);
+        g.addColorStop(0, '#ffffff');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x,y,22,0,Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Pannello "da Terra": i pali A e B sono fissi sullo schermo (sono fissi
+    // a terra); il treno si muove. M è fisso a metà strada.
+    function drawGroundPanel(originX, panelWidth, label){
+        drawTrackBed(originX, panelWidth, label);
+
+        const sxA = trackXToScreen(originX, leftStrikeX, panelWidth);
+        const sxB = trackXToScreen(originX, rightStrikeX, panelWidth);
+        const sxM = trackXToScreen(originX, midX, panelWidth);
+
+        // pali
+        [[sxA,'A'], [sxB,'B']].forEach(([sx,lbl]) => {
+            ctx.save();
+            ctx.strokeStyle = '#9fb0cc';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sx, trackY); ctx.lineTo(sx, trackY - 60);
+            ctx.stroke();
+            ctx.fillStyle = '#cdd5e6';
+            ctx.font = '11px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(lbl, sx, trackY - 66);
+            ctx.restore();
+        });
+
+        // marcatore M
+        ctx.save();
+        ctx.strokeStyle = '#aaffaa';
+        ctx.setLineDash([3,4]);
+        ctx.beginPath();
+        ctx.moveTo(sxM, trackY + 14); ctx.lineTo(sxM, trackY - 30);
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = '#aaffaa';
+        ctx.font = 'bold 12px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('M', sxM, trackY - 34);
+
+        if(strikesHappened){
+            const flashAlpha = Math.max(0, 1 - t/0.45);
+            drawLightningBolt(sxA, trackY - 110, trackY - 12, flashAlpha, '#ffff66');
+            drawLightningBolt(sxB, trackY - 110, trackY - 12, flashAlpha, '#ffff66');
+
+            // raggio della luce in coordinate-binario, convertito in pixel
+            // schermo con lo stesso fattore di scala usato da trackXToScreen
+            const pxPerTrackUnit = (panelWidth - 70) / trackSpan;
+            const lightRadiusPx = C * t * pxPerTrackUnit;
+
+            drawWaveCircle(sxA, trackY, lightRadiusPx, groundHitA !== null && t - groundHitA > 0.2, '#fff066');
+            drawWaveCircle(sxB, trackY, lightRadiusPx, groundHitB !== null && t - groundHitB > 0.2, '#fff066');
+
+            if(groundHitA !== null && t - groundHitA < 0.12) drawFlashBurst(sxM, trackY - 10, 1);
+            if(groundHitB !== null && t - groundHitB < 0.12) drawFlashBurst(sxM, trackY - 10, 1);
+        }
+
+        const centerGroundX = strikesHappened ? trainCenterAt(t) : trainCenterAtStrike;
+        drawTrain(trackXToScreen(originX, centerGroundX, panelWidth), 1, 'M′', '#ff8888');
+
+        if(groundHitA !== null && groundHitB !== null){
+            ctx.fillStyle = '#aaffaa';
+            ctx.font = 'bold 13px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText('✓ Simultanei per M', originX + 12, 50);
+        }
+    }
+
+    // Pannello "dal Treno": il treno (quindi M') resta fisso al centro dello
+    // schermo; sono i pali A e B a scorrere, spostati esattamente della
+    // distanza percorsa dal treno nel frame a terra. Stessa fisica del
+    // pannello sopra, solo punto di vista diverso.
+    function drawTrainPanel(originX, panelWidth, label){
+        drawTrackBed(originX, panelWidth, label);
+
+        const shiftGround = strikesHappened ? (trainCenterAt(t) - trainCenterAtStrike) : 0;
+        const groundXofA = leftStrikeX - shiftGround;
+        const groundXofB = rightStrikeX - shiftGround;
+        const sxA = trackXToScreen(originX, groundXofA, panelWidth);
+        const sxB = trackXToScreen(originX, groundXofB, panelWidth);
+        const sxMPrime = trackXToScreen(originX, midX, panelWidth);
+
+        if(groundXofA >= -40 && groundXofA <= trackSpan + 40){
+            ctx.save();
+            ctx.strokeStyle = '#9fb0cc';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sxA, trackY); ctx.lineTo(sxA, trackY - 60);
+            ctx.stroke();
+            ctx.fillStyle = '#cdd5e6';
+            ctx.font = '11px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('A', sxA, trackY - 66);
+            ctx.restore();
+        }
+        if(groundXofB >= -40 && groundXofB <= trackSpan + 40){
+            ctx.save();
+            ctx.strokeStyle = '#9fb0cc';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sxB, trackY); ctx.lineTo(sxB, trackY - 60);
+            ctx.stroke();
+            ctx.fillStyle = '#cdd5e6';
+            ctx.font = '11px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('B', sxB, trackY - 66);
+            ctx.restore();
+        }
+
+        if(strikesHappened){
+            const flashAlpha = Math.max(0, 1 - t/0.45);
+            if(groundXofA >= -40 && groundXofA <= trackSpan+40) drawLightningBolt(sxA, trackY - 110, trackY - 12, flashAlpha, '#ffff66');
+            if(groundXofB >= -40 && groundXofB <= trackSpan+40) drawLightningBolt(sxB, trackY - 110, trackY - 12, flashAlpha, '#ffff66');
+
+            // stesso principio del pannello da Terra: il cerchio cresce dal
+            // punto d'impatto (qui sxA / sxB, che scorrono sullo schermo
+            // perché siamo nel frame del treno) con raggio C*t in pixel.
+            const pxPerTrackUnit = (panelWidth - 70) / trackSpan;
+            const lightRadiusPx = C * t * pxPerTrackUnit;
+
+            drawWaveCircle(sxA, trackY, lightRadiusPx, trainHitA !== null && t - trainHitA > 0.2, '#fff066');
+            drawWaveCircle(sxB, trackY, lightRadiusPx, trainHitB !== null && t - trainHitB > 0.2, '#fff066');
+
+            if(trainHitA !== null && t - trainHitA < 0.12) drawFlashBurst(sxMPrime, trackY - 70, 1);
+            if(trainHitB !== null && t - trainHitB < 0.12) drawFlashBurst(sxMPrime, trackY - 70, 1);
+        }
+
+        drawTrain(sxMPrime, 1, 'M′', '#ff8888');
+
+        if(trainHitA !== null && trainHitB !== null){
+            const label = trainHitB < trainHitA ? '⚡ Anteriore (B) prima' : (trainHitA < trainHitB ? '⚡ Posteriore (A) prima' : '✓ Simultanei');
+            ctx.fillStyle = '#ff8888';
+            ctx.font = 'bold 13px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(label, originX + 12, 50);
+        }
+    }
+
+    function drawPanelClipped(drawFn, originX, panelWidth, label){
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(originX, 0, panelWidth, H);
+        ctx.clip();
+        drawFn(originX, panelWidth, label);
+        ctx.restore();
+    }
+
+    function draw(){
+        ctx.clearRect(0,0,W,H);
+        ctx.fillStyle = '#0a1428';
+        ctx.fillRect(0,0,W,H);
+
+        timeReadout.textContent = 't = ' + t.toFixed(3);
+
+        const view = viewSelect.value;
+
+        if(view === 'split'){
+            drawPanelClipped(drawGroundPanel, 0, HALF_W, 'Vista da TERRA (M)');
+            drawPanelClipped(drawTrainPanel, HALF_W, HALF_W, 'Vista dal TRENO (M′)');
+            ctx.strokeStyle = '#234';
+            ctx.beginPath();
+            ctx.moveTo(HALF_W, 0); ctx.lineTo(HALF_W, H);
+            ctx.stroke();
+        } else if(view === 'ground'){
+            drawPanelClipped(drawGroundPanel, 0, W, 'Vista da TERRA (M)');
+        } else {
+            drawPanelClipped(drawTrainPanel, 0, W, 'Vista dal TRENO (M′)');
+        }
+    }
+
+    function animate(){
+        if(!running) return;
+        advance(0.005);
+        draw();
+        if(running) requestAnimationFrame(animate);
+    }
+
+    speedValue.textContent = beta.toFixed(2) + 'c';
+    resetState();
+})();
+</script>
+</body>
+</html>
